@@ -43,8 +43,7 @@ def setup_database():
             score REAL,
             web_data TEXT
         )
-    ""
-    )
+    """)  # Fixed closing triple-quotes
     conn.commit()
     conn.close()
 
