@@ -87,11 +87,31 @@ class RankingAgent:
         score += web_data.count(query) * 0.5  # More mentions of the query in web data
         return min(int(score), 10)  # Cap score at 10
 
+import torch
+from transformers import pipeline
+
 class EvolutionAgent:
+    def __init__(self):
+        # Load BERT-based text infilling model
+        self.unmasker = pipeline("fill-mask", model="bert-base-uncased")
+
     def refine(self, hypothesis, web_data):
-        if "solar" in hypothesis.lower():
-            return hypothesis.replace("solar", "advanced solar")
-        return hypothesis
+        words = hypothesis.split()
+        refined_words = []
+
+        for i, word in enumerate(words):
+            # Mask the word and predict replacements
+            masked_sentence = " ".join(words[:i] + ["[MASK]"] + words[i+1:])
+            try:
+                predictions = self.unmasker(masked_sentence)
+                refined_word = predictions[0]['token_str']  # Top prediction
+            except Exception:
+                refined_word = word  # Keep original word in case of an error
+            
+            refined_words.append(refined_word)
+
+        return " ".join(refined_words)
+
 
 class ProximityAgent:
     def find_links(self, query):
