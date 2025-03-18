@@ -164,8 +164,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-#text versctorization reomve it '
-#firebase integration 
-#pandas remove no use 
-#
