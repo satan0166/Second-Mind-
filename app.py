@@ -90,17 +90,135 @@ class RankingAgent:
         length_score = min(len(hypothesis) * 0.1, 10)
         return int(relevance_score + length_score)
 
+import torch
+from transformers import pipeline
+
 class EvolutionAgent:
-    def refine(self, hypothesis):
-        return hypothesis.replace("AI", "Advanced AI") if "AI" in hypothesis.lower() else hypothesis
+    def __init__(self):
+        # Load BERT-based text infilling model
+        self.unmasker = pipeline("fill-mask", model="bert-base-uncased")
+
+    def refine(self, hypothesis, web_data):
+        words = hypothesis.split()
+        refined_words = []
+
+        for i, word in enumerate(words):
+            # Mask the word and predict replacements
+            masked_sentence = " ".join(words[:i] + ["[MASK]"] + words[i+1:])
+            try:
+                predictions = self.unmasker(masked_sentence)
+                refined_word = predictions[0]['token_str']  # Top prediction
+            except Exception:
+                refined_word = word  # Keep original word in case of an error
+            
+            refined_words.append(refined_word)
+
+        return " ".join(refined_words)
+
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 class ProximityAgent:
-    def find_links(self, query):
-        return [doc.to_dict() for doc in db.collection("interactions").where("query", "==", query).stream()]
+    def __init__(self):
+        # Initialize Firebase (Ensure you have the service account JSON)
+        if not firebase_admin._apps:  # Prevent re-initialization error
+            cred = credentials.Certificate("path/to/your/serviceAccountKey.json")
+            firebase_admin.initialize_app(cred)
+        self.db = firestore.client()
+    
+    def recall_interaction(self, query, top_n=3):
+        # Fetch past interactions from Firestore
+        interactions_ref = self.db.collection("interactions").stream()
+        past_interactions = [(doc.to_dict()["query"], doc.to_dict()["output"]) for doc in interactions_ref]
+
+        if not past_interactions:
+            return ["No past interactions found."]
+
+        # Prepare text data for similarity comparison
+        texts = [query] + [f"{q} {o}" for q, o in past_interactions]
+
+        # Compute TF-IDF vectors
+        vectorizer = TfidfVectorizer()
+        tfidf_matrix = vectorizer.fit_transform(texts)
+
+        # Compute cosine similarity with the current query
+        similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
+
+        # Get top N most similar interactions
+        top_indices = similarities.argsort()[-top_n:][::-1]
+        top_matches = [past_interactions[i] for i in top_indices]
+
+        return [f"Query: {q} | Output: {o}" for q, o in top_matches]
+import re
 
 class MetaReviewAgent:
+    def __init__(self, exec_time_threshold=5.0):
+        """
+        Initializes the MetaReviewAgent with performance thresholds.
+        
+        Parameters:
+        exec_time_threshold (float): Time in seconds above which performance optimization is suggested.
+        """
+        self.exec_time_threshold = exec_time_threshold
+        self.error_patterns = {
+            "Scraper": re.compile(r"Error scraping", re.IGNORECASE),
+            "Database": re.compile(r"database|Firebase", re.IGNORECASE),
+            "API": re.compile(r"API|request failed", re.IGNORECASE),
+            "Agent": re.compile(r"Exception in (Generation|Reflection|Ranking|Evolution|Proximity)Agent", re.IGNORECASE)
+        }
+        self.exec_time_pattern = re.compile(r"Execution time: (\d+\.\d+)")
+
     def evaluate(self, logs):
-        return "Improve error handling and optimize web scraping." if "error" in logs else "Process is efficient."
+        """
+        Evaluates logs to detect errors, performance issues, and system efficiency.
+
+        Parameters:
+        logs (list[str]): A list of log messages.
+
+        Returns:
+        str: A structured meta-review summary.
+        """
+        error_count = {key: 0 for key in self.error_patterns}
+        total_errors = 0
+        execution_times = []
+
+        # Process logs efficiently
+        for log in logs:
+            for error_type, pattern in self.error_patterns.items():
+                if pattern.search(log):
+                    error_count[error_type] += 1
+                    total_errors += 1
+            
+            exec_time_match = self.exec_time_pattern.search(log)
+            if exec_time_match:
+                execution_times.append(float(exec_time_match.group(1)))
+
+        # Generate review summary
+        review = []
+        if total_errors:
+            review.append(f"⚠️ **{total_errors} errors detected. Improve error handling.**")
+            review.extend([f"- {count} {etype}-related errors found." for etype, count in error_count.items() if count > 0])
+
+        if execution_times:
+            avg_time = sum(execution_times) / len(execution_times)
+            if avg_time > self.exec_time_threshold:
+                review.append(f"⏳ **Execution time is high ({avg_time:.2f}s). Optimize performance.**")
+
+        return "\n".join(review) if review else "✅ **Process is efficient. No major issues detected.**"
+
+
+# Example usage
+meta_agent = MetaReviewAgent()
+logs = [
+    "Execution time: 6.2",
+    "Error scraping Wikipedia: Timeout",
+    "Database connection failed",
+    "Execution time: 4.1"
+]
+review = meta_agent.evaluate(logs)
+print(review)
+
 
 # ----------------- Supervisor Class -----------------
 class Supervisor:
