@@ -1,28 +1,28 @@
 import os
-import streamlit as st
+import asyncio
 import requests
 import json
-import asyncio
 import aiohttp
-from bs4 import BeautifulSoup
+import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
+from bs4 import BeautifulSoup
 from transformers import pipeline
-import matplotlib.pyplot as plt
 
-# Load API Key from environment variable
+# Load API Key from environment variable (Set it in VS Code using os.environ)
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
-# Initialize Firebase
-json_path = "C:\\Users\\ANSHUMAN\\Downloads\\second-mind-17e47-firebase-adminsdk-fbsvc-4d3c655e7b.json"
+# Initialize Firebase (Check to prevent re-initialization error)
+json_path = os.path.join(os.getcwd(), "second-mind-17e47-firebase-adminsdk-fbsvc-4d3c655e7b.json")
 if not firebase_admin._apps:
-    cred = credentials.Certificate(json_path)  # Ensure correct path
+    cred = credentials.Certificate(json_path)
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 
-# Asynchronous Web Scraping Function (Using SerpAPI + Additional Sources)
+# ----------------- Async Web Scraping -----------------
 async def async_scrape_web(query):
+    """Scrapes search results using SerpAPI and additional sources asynchronously."""
     web_data = ""
 
     async def fetch_url(url):
@@ -37,7 +37,7 @@ async def async_scrape_web(query):
         except Exception as e:
             return f"Error fetching {url}: {e}"
 
-    # Fetch search results
+    # SerpAPI search request
     search_url = f"https://serpapi.com/search.json?q={query}&api_key={SERPAPI_KEY}"
     try:
         response = requests.get(search_url, timeout=10)
@@ -46,9 +46,9 @@ async def async_scrape_web(query):
             organic_results = data.get("organic_results", [])
             web_data = " ".join([result.get("snippet", "") for result in organic_results])
     except Exception as e:
-        st.warning(f"Error fetching SerpAPI results: {e}")
+        print(f"Error fetching SerpAPI results: {e}")
 
-    # Fetch additional sources asynchronously
+    # Additional sources
     additional_sources = [
         f"https://en.wikipedia.org/wiki/{query.replace(' ', '_')}",
         f"https://www.sciencedaily.com/search/?keyword={query}",
@@ -61,14 +61,23 @@ async def async_scrape_web(query):
 
     return web_data.strip()
 
-# AI Agents
+# ----------------- AI Agents -----------------
 class GenerationAgent:
     def __init__(self):
-        self.generator = pipeline("text-generation", model="facebook/opt-1.3b", device=-1)
+        self.generator = pipeline("text-generation", model="mistralai/Mistral-7B-Instruct", device=-1)
 
     def generate(self, query, web_data):
         prompt = f"Generate a well-reasoned hypothesis based on the following information:\n\nQuery: {query}\n\nWeb Data: {web_data[:1000]}\n\nHypothesis:"
         result = self.generator(prompt, max_new_tokens=150, num_return_sequences=1, do_sample=True)
+        return result[0]['generated_text']
+
+class FastGenerationAgent:
+    def __init__(self):
+        self.generator = pipeline("text-generation", model="distilgpt2", device=-1)
+
+    def generate(self, query, web_data):
+        prompt = f"Generate a brief, fast hypothesis based on:\n\nQuery: {query}\n\nWeb Data: {web_data[:500]}\n\nHypothesis:"
+        result = self.generator(prompt, max_new_tokens=100, num_return_sequences=1, do_sample=True)
         return result[0]['generated_text']
 
 class ReflectionAgent:
@@ -93,10 +102,12 @@ class MetaReviewAgent:
     def evaluate(self, logs):
         return "Improve error handling and optimize web scraping." if "error" in logs else "Process is efficient."
 
+# ----------------- Supervisor Class -----------------
 class Supervisor:
     def __init__(self):
         self.agents = {
             "generate": GenerationAgent(),
+            "fast_generate": FastGenerationAgent(),
             "reflect": ReflectionAgent(),
             "rank": RankingAgent(),
             "evolve": EvolutionAgent(),
@@ -106,7 +117,7 @@ class Supervisor:
     
     async def process_query(self, query):
         web_data = await async_scrape_web(query)
-        hypothesis = self.agents["generate"].generate(query, web_data)
+        hypothesis = self.agents["fast_generate"].generate(query, web_data)
         
         if not self.agents["reflect"].check_coherence(hypothesis, query):
             hypothesis = "Adjusted: " + hypothesis
@@ -114,7 +125,6 @@ class Supervisor:
         score = self.agents["rank"].score(hypothesis, web_data, query)
         refined_hypothesis = self.agents["evolve"].refine(hypothesis)
         
-        # Store interaction in Firebase
         db.collection("interactions").document().set({
             "query": query,
             "hypothesis": refined_hypothesis,
@@ -125,49 +135,24 @@ class Supervisor:
         logs = f"Processed {query} with score {score}"
         return refined_hypothesis, score, self.agents["meta"].evaluate(logs)
 
-# Streamlit UI
+# ----------------- Streamlit App -----------------
 def main():
-    st.set_page_config(page_title="The Second Mind", layout="wide")
-    st.title("🤖 The Second Mind: AI Agents for Iterative Learning")
-    query = st.text_input("🔍 Enter your query (e.g., 'Urban Renewable Energy'):")
+    st.title("AI Hypothesis Generator")
 
-    if query:
-        supervisor = Supervisor()
-        scores, interactions = [], []
-        
-        with st.spinner("🔄 Processing..."):
+    query = st.text_input("Enter a topic:")
+    if st.button("Generate Hypothesis"):
+        if not query:
+            st.warning("Please enter a topic.")
+        else:
+            supervisor = Supervisor()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            refined_hypothesis, score, meta_evaluation = loop.run_until_complete(supervisor.process_query(query))
 
-            for cycle in range(1, 4):
-                hypothesis, score, evaluation = loop.run_until_complete(supervisor.process_query(query))
-                interactions.append({"cycle": cycle, "query": query, "hypothesis": hypothesis, "score": score})
-                
-                st.subheader(f"🌀 Cycle {cycle}")
-                st.write(f"**Query:** {query}")
-                st.write(f"**Hypothesis:** {hypothesis}")
-                st.write(f"**Score:** {score}/10")
-                st.write(f"📌 **Evaluation:** {evaluation}")
-                
-                scores.append(score)
-                query = hypothesis  # Iterative improvement
-        
-        # Store session logs in Firestore
-        db.collection("session_logs").document().set({"interactions": interactions})
-
-        # Score Improvement Chart
-        st.subheader("📊 Score Improvement Over Cycles")
-        fig, ax = plt.subplots()
-        ax.plot(range(1, len(scores) + 1), scores, marker="o", linestyle="-", color="b")
-        ax.set_xlabel("Cycle")
-        ax.set_ylabel("Score")
-        ax.set_title("Score Progression")
-        ax.grid(True)
-        st.pyplot(fig)
-
-        # Stored Interactions
-        st.subheader("📁 Stored Interactions")
-        st.json(interactions)
+            st.subheader("Generated Hypothesis")
+            st.write(refined_hypothesis)
+            st.write(f"Relevance Score: {score}")
+            st.write(f"Meta Review: {meta_evaluation}")
 
 if __name__ == "__main__":
     main()
